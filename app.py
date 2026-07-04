@@ -25,13 +25,13 @@ NUEVOS_CER = {  # ticker: (emision, vencimiento) — cupón cero
 NUEVOS_FIJA = {  # ticker: (emision, vencimiento, TEM%) — letra tasa fija nueva
     "S13N6": ("2026-06-30", "2026-11-13", 2.10),
 }
-# bonos TAMAR puros: VT actual + margen sobre TAMAR (vencimientos estimados a confirmar)
+# bonos TAMAR puros: emisión (completar) + margen; vt_ref = VPV de referencia (Docta) para validar
 SEED_TAMAR = [
-    {"ticker": "M31G6", "vencimiento": "2026-08-31", "margen": 5.0,  "vt": 129.70},
-    {"ticker": "TMF27", "vencimiento": "2027-02-26", "margen": 6.5,  "vt": 136.42},
-    {"ticker": "TML27", "vencimiento": "2027-07-30", "margen": 5.4,  "vt": 134.79},
-    {"ticker": "TMG27", "vencimiento": "2027-08-31", "margen": 6.0,  "vt": 149.36},
-    {"ticker": "TMF28", "vencimiento": "2028-02-29", "margen": 6.5,  "vt": 170.23},
+    {"ticker": "M31G6", "emision": "", "vencimiento": "2026-08-31", "margen": 5.0, "vt_ref": 129.70},
+    {"ticker": "TMF27", "emision": "", "vencimiento": "2027-02-26", "margen": 6.5, "vt_ref": 136.42},
+    {"ticker": "TML27", "emision": "", "vencimiento": "2027-07-30", "margen": 5.4, "vt_ref": 134.79},
+    {"ticker": "TMG27", "emision": "", "vencimiento": "2027-08-31", "margen": 6.0, "vt_ref": 149.36},
+    {"ticker": "TMF28", "emision": "", "vencimiento": "2028-02-29", "margen": 6.5, "vt_ref": 170.23},
 ]
 
 # ----------------------------------------------------------------- estilo
@@ -204,6 +204,26 @@ def dias360(f1, f2):
     a1, m1, d1 = map(int, str(f1)[:10].split("-")); a2, m2, d2 = map(int, str(f2)[:10].split("-"))
     d1 = min(d1, 30); d2 = min(d2, 30) if d1 == 30 else d2
     return (a2 - a1) * 360 + (m2 - m1) * 30 + (d2 - d1)
+
+def vpv_tamar(ts, feriados, emis, venc, margen, proy):
+    """VPV oficial TAMAR. TAMAR = promedio simple de la tira en [emisión−10háb, vencimiento−10háb];
+    parte publicada real + parte futura proyectada (proy), ponderadas por días hábiles."""
+    d_e = np.datetime64(pd.Timestamp(emis).date(), "D"); d_v = np.datetime64(pd.Timestamp(venc).date(), "D")
+    w0 = pd.Timestamp(np.busday_offset(d_e, -10, roll="backward", holidays=feriados))
+    w1 = pd.Timestamp(np.busday_offset(d_v, -10, roll="backward", holidays=feriados))
+    last = ts.index.max()
+    conocido = ts[(ts.index >= w0) & (ts.index <= min(w1, last))]
+    n_con = len(conocido); suma = float(conocido.sum())
+    n_proj = int(np.busday_count(np.datetime64(last.date(), "D"), np.datetime64(w1.date(), "D"),
+                                 holidays=feriados)) if w1 > last else 0
+    total = n_con + n_proj
+    if total <= 0: return None
+    avg = (suma + proy * n_proj) / total                      # TAMAR promedio (%) sobre la ventana
+    x = (avg + margen) / 100 / (365 / 32)
+    tem = (1 + x) ** (365 / 32)
+    tem = tem ** (1 / 12) - 1                                  # TAMAR TEM
+    vpv = 100 * (1 + tem) ** (dias360(emis, venc) / 30)        # meses 30/360 = días/30
+    return vpv, avg, tem, (n_con / total)
 
 def regresion(df, col, excluir_fit):
     df["TIR_fit"] = np.nan; df["bps_curva"] = np.nan; df["señal"] = None
@@ -585,51 +605,78 @@ with tab_m:
         st.caption("Treasuries/commodities no disponibles en este momento.")
 
 with tab_t:
-    st.markdown("**Bonos TAMAR** — TIR proyectando la TAMAR promedio de las últimas 5 + margen")
+    st.markdown("**Bonos TAMAR** — VPV oficial (TAMAR TEM capitalizable mensual, 30/360)")
     ts = cargar_tamar()
-    proy = float(ts.tail(5).mean()) if (ts is not None and len(ts)) else None
-    if proy is None:
+    if ts is None or not len(ts):
         st.info("No se pudo traer la tira TAMAR (BCRA, puede requerir IP argentina).")
     else:
-        ult_f = ts.index.max(); ult_v = float(ts.iloc[-1])
+        proy = float(ts.tail(5).mean()); ult_f = ts.index.max(); ult_v = float(ts.iloc[-1])
         k1, k2 = st.columns(2)
         k1.metric("TAMAR último", f"{ult_v:.2f}%", help=f"al {ult_f:%d/%m/%Y}")
-        k2.metric("TAMAR proyectada", f"{proy:.2f}%", help="promedio de las últimas 5 publicadas")
+        k2.metric("TAMAR proyectada", f"{proy:.2f}%", help="promedio de las últimas 5, para la parte futura")
+        st.caption("Completá la **emisión** de cada bono (AAAA-MM-DD). La TAMAR se promedia desde 10 háb antes de la emisión "
+                   "hasta 10 háb antes del vencimiento: la parte publicada sale de la tira, la futura se proyecta.")
+        if "tamar_in" not in st.session_state:
+            st.session_state.tamar_in = pd.DataFrame(SEED_TAMAR)
+        ed = st.data_editor(st.session_state.tamar_in, hide_index=True, width="stretch", num_rows="dynamic",
+            column_config={
+                "ticker": st.column_config.TextColumn("Especie"),
+                "emision": st.column_config.TextColumn("Emisión"),
+                "vencimiento": st.column_config.TextColumn("Vencimiento"),
+                "margen": st.column_config.NumberColumn("Margen %", format="%.2f"),
+                "vt_ref": st.column_config.NumberColumn("VPV ref", format="%.2f", help="referencia Docta para validar")},
+            key="ed_tamar_in")
+        st.session_state.tamar_in = ed
+
         filas = []
-        for b in SEED_TAMAR:
-            tk = b["ticker"]; venc = pd.to_datetime(b["vencimiento"]); marg = b["margen"]; vt = b["vt"]
+        for _, r in ed.iterrows():
+            tk = str(r.get("ticker", "")).strip()
+            emis = pd.to_datetime(r.get("emision"), errors="coerce")
+            venc = pd.to_datetime(r.get("vencimiento"), errors="coerce")
+            try: marg = float(r.get("margen") or 0)
+            except Exception: marg = 0.0
+            if not tk or pd.isna(venc): continue
             n = (venc - sett).days
-            if n <= 0: continue
-            pago = vt * (1 + (proy + marg) / 100 / 365) ** n
             precio = precios.get(tk)
             fila = {"ticker": tk, "venc": venc.date(), "margen": marg / 100,
                     "precio": float(precio) if precio and precio > 0 else np.nan, "vol": vols.get(tk),
-                    "TIR": np.nan, "TNA": np.nan, "TEM": np.nan, "MD": np.nan,
-                    "dias": n, "VT": vt, "pago_final": round(pago, 2)}
-            if precio and precio > 0:
-                rr = pago / precio; tir = rr ** (365 / n) - 1
-                fila.update({"TIR": tir, "TNA": (rr - 1) * 365 / n,
-                             "TEM": (1 + tir) ** (1/12) - 1, "MD": (n / 365) / (1 + tir)})
+                    "TIR": np.nan, "TNA": np.nan, "TEM": np.nan, "MD": np.nan, "dias": n,
+                    "TAMAR_prom": np.nan, "pct_conoc": np.nan, "VT_hoy": np.nan, "VPV": np.nan}
+            if pd.notna(emis):
+                out = vpv_tamar(ts, feriados, emis, venc, marg, proy)
+                if out:
+                    vpv, avg, temb, pk = out
+                    vt_hoy = 100 * (1 + temb) ** (dias360(emis, pd.Timestamp(date.today())) / 30)
+                    fila.update({"TAMAR_prom": avg / 100, "pct_conoc": pk,
+                                 "VT_hoy": round(vt_hoy, 2), "VPV": round(vpv, 2)})
+                    if precio and precio > 0 and n > 0:
+                        rr = vpv / precio; tir = rr ** (365 / n) - 1
+                        fila.update({"TIR": tir, "TNA": (rr - 1) * 365 / n,
+                                     "TEM": (1 + tir) ** (1/12) - 1, "MD": (n / 365) / (1 + tir)})
             filas.append(fila)
-        res = pd.DataFrame(filas).sort_values("dias")
-        st.dataframe(res, hide_index=True, width="stretch",
-            column_order=["ticker", "venc", "precio", "vol", "TIR", "TNA", "TEM", "MD", "dias", "margen", "VT", "pago_final"],
-            column_config={
-                "ticker": st.column_config.TextColumn("Especie"),
-                "venc": st.column_config.DateColumn("Vto", format="DD/MM/YYYY"),
-                "precio": st.column_config.NumberColumn("Precio", format="%.2f"),
-                "vol": st.column_config.NumberColumn("Vol", format="%d"),
-                "TIR": st.column_config.NumberColumn("TIR", format="percent"),
-                "TNA": st.column_config.NumberColumn("TNA", format="percent"),
-                "TEM": st.column_config.NumberColumn("TEM", format="percent"),
-                "MD": st.column_config.NumberColumn("MD", format="%.2f"),
-                "dias": st.column_config.NumberColumn("Días", format="%d"),
-                "margen": st.column_config.NumberColumn("Margen", format="percent"),
-                "VT": st.column_config.NumberColumn("VT", format="%.2f"),
-                "pago_final": st.column_config.NumberColumn("Pago final", format="%.2f")})
-        st.caption("Pago final = VT · (1 + (TAMAR_proy + margen)/365)^días, con TAMAR_proy = promedio de las últimas 5. "
-                   "TIR/TNA/TEM contra el precio de data912. VT y margen fijos según condiciones de emisión. "
-                   "Aplica a TAMAR puros; los duales (BONTAM, CER/TAMAR) no se valúan así.")
+        res = pd.DataFrame(filas).sort_values("dias") if filas else pd.DataFrame()
+        if len(res):
+            st.dataframe(res, hide_index=True, width="stretch",
+                column_order=["ticker", "venc", "precio", "vol", "TIR", "TNA", "TEM", "MD", "dias",
+                              "margen", "TAMAR_prom", "pct_conoc", "VT_hoy", "VPV"],
+                column_config={
+                    "ticker": st.column_config.TextColumn("Especie"),
+                    "venc": st.column_config.DateColumn("Vto", format="DD/MM/YYYY"),
+                    "precio": st.column_config.NumberColumn("Precio", format="%.2f"),
+                    "vol": st.column_config.NumberColumn("Vol", format="%d"),
+                    "TIR": st.column_config.NumberColumn("TIR", format="percent"),
+                    "TNA": st.column_config.NumberColumn("TNA", format="percent"),
+                    "TEM": st.column_config.NumberColumn("TEM", format="percent"),
+                    "MD": st.column_config.NumberColumn("MD", format="%.2f"),
+                    "dias": st.column_config.NumberColumn("Días", format="%d"),
+                    "margen": st.column_config.NumberColumn("Margen", format="percent"),
+                    "TAMAR_prom": st.column_config.NumberColumn("TAMAR prom", format="percent"),
+                    "pct_conoc": st.column_config.ProgressColumn("% conocido", format="%.0f%%", min_value=0.0, max_value=1.0),
+                    "VT_hoy": st.column_config.NumberColumn("VT hoy", format="%.2f"),
+                    "VPV": st.column_config.NumberColumn("VPV", format="%.2f")})
+        st.caption("VPV = 100·(1+TAMAR_TEM)^(días 30/360 / 30) · TAMAR_TEM = ((1+(TAMAR+margen)/(365/32))^(365/32))^(1/12)−1. "
+                   "TAMAR = promedio simple en [emisión−10háb, vto−10háb]; parte futura a la TAMAR proyectada. "
+                   "Validá «VT hoy» contra el VT que ves en Docta para confirmar la emisión; la TIR usa el VPV contra el precio.")
 
 with st.expander("📐 Cómo se calcula cada métrica"):
     st.markdown(r"""
