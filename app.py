@@ -161,6 +161,26 @@ def cargar_tasas_bcra():
         except Exception: pass
     return out
 
+@st.cache_data(ttl=3600, show_spinner="Tira TAMAR…")
+def cargar_tamar(desde="2024-01-01"):
+    try:
+        cat = _get(BCRA, verify=False)["results"]
+        idv = next(x["idVariable"] for x in cat if "tamar" in str(x.get("descripcion", "")).lower())
+    except Exception:
+        return None
+    hasta = date.today().isoformat(); out = []
+    for y in range(int(desde[:4]), int(hasta[:4]) + 1):
+        d = desde if y == int(desde[:4]) else f"{y}-01-01"
+        h = hasta if y == int(hasta[:4]) else f"{y}-12-31"
+        try:
+            res = _get(f"{BCRA}/{idv}?desde={d}&hasta={h}", verify=False)["results"]
+            out += res[0]["detalle"] if (res and isinstance(res[0], dict) and "detalle" in res[0]) else res
+        except Exception: pass
+    if not out: return None
+    return (pd.DataFrame(out).rename(columns={"valor": "tamar"})[["fecha", "tamar"]]
+            .assign(fecha=lambda x: pd.to_datetime(x["fecha"])).sort_values("fecha")
+            .drop_duplicates("fecha").set_index("fecha")["tamar"])
+
 # ----------------------------------------------------------------- helpers comunes
 def settlement(feriados, plazo):
     hoy = np.datetime64(date.today(), "D")
@@ -306,17 +326,12 @@ for _d in (df_fija, df_cer):
     _d["var"] = _d["ticker"].map(varia)
     _d["var_txt"] = _d["var"].map(var_txt)
 
-_ct, _cf = st.columns([3, 1])
-_ct.title("Calculadora")
-if os.path.exists("caputo.jpg"):
-    _cf.image("caputo.jpg", width=260)
-c1, c2, c3, c4 = st.columns(4)
+st.title("Calculadora")
+c1, c2 = st.columns(2)
 c1.metric("Liquidación", sett.strftime("%d/%m/%Y"))
 c2.metric(f"CER ref (−{LAG}h)", f"{cer_ref(sett, LAG):,.2f}")
-c3.metric("Fija c/precio", f"{int(df_fija['precio'].notna().sum())}/{len(df_fija)}")
-c4.metric("CER c/precio", f"{int(df_cer['precio'].notna().sum())}/{len(df_cer)}")
 
-tab_c, tab_f, tab_r, tab_b, tab_i, tab_m = st.tabs(["Curvas", "Tasa Fija", "CER", "Breakeven", "Inversa", "Macro"])
+tab_c, tab_f, tab_r, tab_b, tab_i, tab_m, tab_t = st.tabs(["Curvas", "Tasa Fija", "CER", "Breakeven", "Inversa", "Macro", "TAMAR"])
 
 # ---- curva por clase ----
 def curva_chart(df, coef, linecolor):
@@ -552,6 +567,43 @@ with tab_m:
         st.caption("Treasuries y commodities: Stooq (cierre, puede tener algo de delay).")
     else:
         st.caption("Treasuries/commodities no disponibles en este momento.")
+
+with tab_t:
+    st.markdown("**Calculadora TAMAR** — capitalización diaria con la tira TAMAR del BCRA")
+    ts = cargar_tamar()
+    if ts is None or not len(ts):
+        st.info("No se pudo traer la tira TAMAR (BCRA, puede requerir IP argentina).")
+    else:
+        diaria = ts.reindex(pd.date_range(ts.index.min(), ts.index.max(), freq="D")).ffill()
+        ult_f = diaria.index.max(); ult_v = float(diaria.iloc[-1])
+        st.caption(f"TAMAR al {ult_f.strftime('%d/%m/%Y')}: {ult_v:.2f}% TNA · tira desde {diaria.index.min().strftime('%d/%m/%Y')}")
+        cc1, cc2, cc3 = st.columns(3)
+        f_emis = cc1.date_input("Emisión", value=(ult_f - pd.Timedelta(days=180)).date())
+        f_venc = cc2.date_input("Vencimiento", value=(ult_f + pd.Timedelta(days=180)).date())
+        spread = cc3.number_input("Spread s/TAMAR (% n.a.)", value=0.0, step=0.5)
+        precio_t = st.number_input("Precio (para TIR, opcional)", value=100.0, step=0.5)
+        hoy_ts = pd.Timestamp(date.today())
+        fin_dev = min(hoy_ts, pd.Timestamp(f_venc))
+        factor_dev = 1.0
+        if pd.Timestamp(f_emis) < fin_dev:
+            camino = diaria.reindex(pd.date_range(f_emis, fin_dev, freq="D")).ffill().bfill()
+            factor_dev = float(np.prod(1 + (camino.values + spread) / 100 / 365))
+        factor_fut = 1.0
+        if pd.Timestamp(f_venc) > hoy_ts:
+            dias_fut = (pd.Timestamp(f_venc) - hoy_ts).days
+            factor_fut = (1 + (ult_v + spread) / 100 / 365) ** dias_fut
+        vt_hoy = 100 * factor_dev
+        pago_final = 100 * factor_dev * factor_fut
+        mm1, mm2, mm3 = st.columns(3)
+        mm1.metric("Valor técnico hoy", f"{vt_hoy:,.2f}")
+        mm2.metric("Pago final proyectado", f"{pago_final:,.2f}")
+        n_t = (pd.Timestamp(f_venc) - sett).days
+        if precio_t and precio_t > 0 and n_t > 0:
+            tir_t = (pago_final / precio_t) ** (365 / n_t) - 1
+            mm3.metric("TIR proyectada", f"{tir_t*100:.2f}%")
+        st.caption("Capitalización diaria base 365: factor = Π(1 + (TAMAR_d + spread)/365). "
+                   "Devengado con TAMAR real hasta hoy; de hoy al vencimiento se proyecta TAMAR constante en el último valor. "
+                   "Validá contra un bono TAMAR conocido y ajustá spread/convención si hace falta.")
 
 with st.expander("📐 Cómo se calcula cada métrica"):
     st.markdown(r"""
