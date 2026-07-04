@@ -112,11 +112,16 @@ def cargar_precios():
             v = el.get(k)
             if isinstance(v, (int, float)): return float(v)
         return np.nan
-    precios, varia = {}, {}
+    def vol(el):
+        for k in ("v", "volume", "q_op", "vol", "q"):
+            x = el.get(k)
+            if isinstance(x, (int, float)): return float(x)
+        return np.nan
+    precios, varia, vols = {}, {}, {}
     for el in uni:
         s = el.get("symbol")
-        if s: precios[s] = px(el); varia[s] = var(el)
-    return precios, varia, len(uni)
+        if s: precios[s] = px(el); varia[s] = var(el); vols[s] = vol(el)
+    return precios, varia, vols, len(uni)
 
 @st.cache_data(ttl=300, show_spinner=False)
 def cargar_dolares():
@@ -271,7 +276,7 @@ def calc_fija(letras, precios, sett):
 # ----------------------------------------------------------------- carga
 cer = cargar_cer(); feriados = cargar_feriados()
 bonos_cer = cargar_config(); letras = list(cargar_letras())
-precios_live, varia, n_uni = cargar_precios()
+precios_live, varia, vols, n_uni = cargar_precios()
 st.session_state.setdefault("manual", {})
 
 cer_diario = (cer.set_index("fecha")["cer"].reindex(pd.date_range(cer["fecha"].min(), cer["fecha"].max(), freq="D")).ffill())
@@ -315,8 +320,8 @@ precios = {**precios_live, **st.session_state.manual}
 sett = settlement(feriados, plazo)
 df_cer = calc_cer(bonos_cer, precios, cer_ref, sett)
 df_fija = calc_fija(letras, precios, sett)
-df_cer, coef_cer, info_cer = regresion(df_cer, "TIR", exc_cer)
-df_fija, coef_fija, info_fija = regresion(df_fija, "TIR", exc_fija)
+df_cer, coef_cer, info_cer = regresion(df_cer, "TNA", exc_cer)
+df_fija, coef_fija, info_fija = regresion(df_fija, "TNA", exc_fija)
 
 def var_txt(v):
     if v is None or (isinstance(v, float) and v != v): return ""
@@ -325,6 +330,7 @@ def var_txt(v):
 for _d in (df_fija, df_cer):
     _d["var"] = _d["ticker"].map(varia)
     _d["var_txt"] = _d["var"].map(var_txt)
+    _d["vol"] = _d["ticker"].map(vols)
 
 st.title("Calculadora")
 c1, c2 = st.columns(2)
@@ -335,12 +341,12 @@ tab_c, tab_f, tab_r, tab_b, tab_i, tab_m, tab_t = st.tabs(["Curvas", "Tasa Fija"
 
 # ---- curva por clase ----
 def curva_chart(df, coef, linecolor):
-    plot = df.dropna(subset=["MD", "TIR"])
+    plot = df.dropna(subset=["MD", "TNA"])
     if not len(plot):
         return None
     base = alt.Chart(plot).encode(
         x=alt.X("MD:Q", title="Modified Duration (años)", scale=alt.Scale(zero=False)),
-        y=alt.Y("TIR:Q", title="TIR", axis=alt.Axis(format="%"), scale=alt.Scale(zero=False)))
+        y=alt.Y("TNA:Q", title="TNA", axis=alt.Axis(format="%"), scale=alt.Scale(zero=False)))
     pts = base.mark_circle(size=170, opacity=.9).encode(
         color=alt.Color("señal:N", title="vs curva",
                         scale=alt.Scale(domain=["barato", "caro"], range=["#1f7a4d", "#b23a2e"])),
@@ -352,8 +358,8 @@ def curva_chart(df, coef, linecolor):
     capas = [pts, txt]
     if coef is not None:
         a_, b_ = coef; xs = np.linspace(plot["MD"].min(), plot["MD"].max(), 60)
-        ld = pd.DataFrame({"MD": xs, "TIR": a_ + b_*np.log(xs)})
-        capas = [alt.Chart(ld).mark_line(color=linecolor, strokeDash=[5, 4], size=1.5).encode(x="MD:Q", y="TIR:Q")] + capas
+        ld = pd.DataFrame({"MD": xs, "TNA": a_ + b_*np.log(xs)})
+        capas = [alt.Chart(ld).mark_line(color=linecolor, strokeDash=[5, 4], size=1.5).encode(x="MD:Q", y="TNA:Q")] + capas
     return alt.layer(*capas).interactive().properties(height=380)
 
 with tab_c:
@@ -379,11 +385,12 @@ def editor(df, orden, cfg, key):
 with tab_f:
     st.caption("Tasa fija (base 365). Editá **Precio** con doble click.")
     editor(df_fija,
-        ["ticker", "venc", "precio", "var_txt", "TIR", "TNA", "TEM", "MD", "dias", "tipo", "bps_curva", "señal", "paridad", "vpv"],
+        ["ticker", "venc", "precio", "var_txt", "vol", "TIR", "TNA", "TEM", "MD", "dias", "tipo", "bps_curva", "señal", "paridad", "vpv"],
         {"ticker": st.column_config.TextColumn("Especie", disabled=True),
          "venc": st.column_config.DateColumn("Vto", format="DD/MM/YYYY", disabled=True),
          "precio": st.column_config.NumberColumn("Precio", format="%.2f"),
          "var_txt": st.column_config.TextColumn("Var", disabled=True),
+         "vol": st.column_config.NumberColumn("Vol", format="%d", disabled=True),
          "TIR": st.column_config.NumberColumn("TIR", format="percent", disabled=True),
          "TNA": st.column_config.NumberColumn("TNA", format="percent", disabled=True),
          "TEM": st.column_config.NumberColumn("TEM", format="percent", disabled=True),
@@ -398,11 +405,12 @@ with tab_f:
 with tab_r:
     st.caption("CER (TIR real, rezago 10 háb). Editá **Precio** con doble click.")
     editor(df_cer,
-        ["ticker", "venc", "precio", "var_txt", "TIR", "TNA", "MD", "dias", "tipo", "bps_curva", "señal", "paridad", "VT"],
+        ["ticker", "venc", "precio", "var_txt", "vol", "TIR", "TNA", "MD", "dias", "tipo", "bps_curva", "señal", "paridad", "VT"],
         {"ticker": st.column_config.TextColumn("Especie", disabled=True),
          "venc": st.column_config.DateColumn("Vto", format="DD/MM/YYYY", disabled=True),
          "precio": st.column_config.NumberColumn("Precio", format="%.2f"),
          "var_txt": st.column_config.TextColumn("Var", disabled=True),
+         "vol": st.column_config.NumberColumn("Vol", format="%d", disabled=True),
          "TIR": st.column_config.NumberColumn("TIR real", format="percent", disabled=True),
          "TNA": st.column_config.NumberColumn("TNA real", format="percent", disabled=True),
          "MD": st.column_config.NumberColumn("MD", format="%.2f", disabled=True),
@@ -581,7 +589,11 @@ with tab_t:
         f_emis = cc1.date_input("Emisión", value=(ult_f - pd.Timedelta(days=180)).date())
         f_venc = cc2.date_input("Vencimiento", value=(ult_f + pd.Timedelta(days=180)).date())
         spread = cc3.number_input("Spread s/TAMAR (% n.a.)", value=0.0, step=0.5)
-        precio_t = st.number_input("Precio (para TIR, opcional)", value=100.0, step=0.5)
+        tks_t = [""] + sorted(precios.keys())
+        tk_sel = st.selectbox("Ticker TAMAR (opcional, trae precio de data912)", tks_t)
+        px_auto = precios.get(tk_sel) if tk_sel else None
+        precio_t = st.number_input("Precio (para TIR)",
+            value=float(px_auto) if isinstance(px_auto, (int, float)) and px_auto == px_auto else 100.0, step=0.5)
         hoy_ts = pd.Timestamp(date.today())
         fin_dev = min(hoy_ts, pd.Timestamp(f_venc))
         factor_dev = 1.0
