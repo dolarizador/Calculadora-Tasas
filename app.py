@@ -9,7 +9,7 @@ import streamlit as st
 import os
 import urllib3; urllib3.disable_warnings()
 
-st.set_page_config(page_title="Calculadora de tasas", layout="wide")
+st.set_page_config(page_title="Calculadora Esta Todo Bien Loko", layout="wide")
 
 BCRA = "https://api.bcra.gob.ar/estadisticas/v4.0/Monetarias"
 HDRS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
@@ -25,13 +25,13 @@ NUEVOS_CER = {  # ticker: (emision, vencimiento) — cupón cero
 NUEVOS_FIJA = {  # ticker: (emision, vencimiento, TEM%) — letra tasa fija nueva
     "S13N6": ("2026-06-30", "2026-11-13", 2.10),
 }
-# bonos TAMAR puros: emisión (completar) + margen; vt_ref = VPV de referencia (Docta) para validar
+# bonos TAMAR puros: emisión + margen. vt_ref = VT de referencia (Docta) para validar.
 SEED_TAMAR = [
-    {"ticker": "M31G6", "emision": "", "vencimiento": "2026-08-31", "margen": 5.0, "vt_ref": 129.70},
-    {"ticker": "TMF27", "emision": "", "vencimiento": "2027-02-26", "margen": 6.5, "vt_ref": 136.42},
-    {"ticker": "TML27", "emision": "", "vencimiento": "2027-07-30", "margen": 5.4, "vt_ref": 134.79},
-    {"ticker": "TMG27", "emision": "", "vencimiento": "2027-08-31", "margen": 6.0, "vt_ref": 149.36},
-    {"ticker": "TMF28", "emision": "", "vencimiento": "2028-02-29", "margen": 6.5, "vt_ref": 170.23},
+    {"ticker": "M31G6", "emision": "2025-11-09", "vencimiento": "2026-08-31", "margen": 5.0, "vt_ref": 129.70},
+    {"ticker": "TMF27", "emision": "2026-02-13", "vencimiento": "2027-02-26", "margen": 6.5, "vt_ref": 136.42},
+    {"ticker": "TMG27", "emision": "2026-04-01", "vencimiento": "2027-08-31", "margen": 6.0, "vt_ref": 149.36},
+    {"ticker": "TMF28", "emision": "2026-04-19", "vencimiento": "2028-02-29", "margen": 6.5, "vt_ref": 170.23},
+    {"ticker": "TMG28", "emision": "2026-04-30", "vencimiento": "2028-08-31", "margen": 6.5, "vt_ref": None},
 ]
 
 # ----------------------------------------------------------------- estilo
@@ -360,7 +360,7 @@ for _d in (df_fija, df_cer):
     _d["var_txt"] = _d["var"].map(var_txt)
     _d["vol"] = _d["ticker"].map(vols)
 
-st.title("Calculadora")
+st.title("Calculadora Esta Todo Bien Loko")
 c1, c2 = st.columns(2)
 c1.metric("Liquidación", sett.strftime("%d/%m/%Y"))
 c2.metric(f"CER ref (−{LAG}h)", f"{cer_ref(sett, LAG):,.2f}")
@@ -614,104 +614,51 @@ with tab_t:
         k1, k2 = st.columns(2)
         k1.metric("TAMAR último", f"{ult_v:.2f}%", help=f"al {ult_f:%d/%m/%Y}")
         k2.metric("TAMAR proyectada", f"{proy:.2f}%", help="promedio de las últimas 5, para la parte futura")
-        st.caption("Completá la **emisión** de cada bono (AAAA-MM-DD). La TAMAR se promedia desde 10 háb antes de la emisión "
-                   "hasta 10 háb antes del vencimiento: la parte publicada sale de la tira, la futura se proyecta.")
-        if "tamar_in" not in st.session_state:
-            st.session_state.tamar_in = pd.DataFrame(SEED_TAMAR)
-        ed = st.data_editor(st.session_state.tamar_in, hide_index=True, width="stretch", num_rows="dynamic",
-            column_config={
-                "ticker": st.column_config.TextColumn("Especie"),
-                "emision": st.column_config.TextColumn("Emisión"),
-                "vencimiento": st.column_config.TextColumn("Vencimiento"),
-                "margen": st.column_config.NumberColumn("Margen %", format="%.2f"),
-                "vt_ref": st.column_config.NumberColumn("VPV ref", format="%.2f", help="referencia Docta para validar")},
-            key="ed_tamar_in")
-        st.session_state.tamar_in = ed
 
         filas = []
-        for _, r in ed.iterrows():
-            tk = str(r.get("ticker", "")).strip()
-            emis = pd.to_datetime(r.get("emision"), errors="coerce")
-            venc = pd.to_datetime(r.get("vencimiento"), errors="coerce")
-            try: marg = float(r.get("margen") or 0)
-            except Exception: marg = 0.0
-            if not tk or pd.isna(venc): continue
-            n = (venc - sett).days
+        for b in SEED_TAMAR:
+            tk = b["ticker"]; emis = pd.to_datetime(b["emision"]); venc = pd.to_datetime(b["vencimiento"])
+            marg = float(b["margen"]); n = (venc - sett).days
             precio = precios.get(tk)
             fila = {"ticker": tk, "venc": venc.date(), "margen": marg / 100,
                     "precio": float(precio) if precio and precio > 0 else np.nan, "vol": vols.get(tk),
                     "TIR": np.nan, "TNA": np.nan, "TEM": np.nan, "MD": np.nan, "dias": n,
                     "TAMAR_prom": np.nan, "pct_conoc": np.nan, "VT_hoy": np.nan, "VPV": np.nan}
-            if pd.notna(emis):
-                out = vpv_tamar(ts, feriados, emis, venc, marg, proy)
-                if out:
-                    vpv, avg, temb, pk = out
-                    vt_hoy = 100 * (1 + temb) ** (dias360(emis, pd.Timestamp(date.today())) / 30)
-                    fila.update({"TAMAR_prom": avg / 100, "pct_conoc": pk,
-                                 "VT_hoy": round(vt_hoy, 2), "VPV": round(vpv, 2)})
-                    if precio and precio > 0 and n > 0:
-                        rr = vpv / precio; tir = rr ** (365 / n) - 1
-                        fila.update({"TIR": tir, "TNA": (rr - 1) * 365 / n,
-                                     "TEM": (1 + tir) ** (1/12) - 1, "MD": (n / 365) / (1 + tir)})
+            out = vpv_tamar(ts, feriados, emis, venc, marg, proy)
+            if out:
+                vpv, avg, temb, pk = out
+                vt_hoy = 100 * (1 + temb) ** (dias360(emis, pd.Timestamp(date.today())) / 30)
+                fila.update({"TAMAR_prom": avg / 100, "pct_conoc": pk,
+                             "VT_hoy": round(vt_hoy, 2), "VPV": round(vpv, 2)})
+                if precio and precio > 0 and n > 0:
+                    rr = vpv / precio; tir = rr ** (365 / n) - 1
+                    fila.update({"TIR": tir, "TNA": (rr - 1) * 365 / n,
+                                 "TEM": (1 + tir) ** (1/12) - 1, "MD": (n / 365) / (1 + tir)})
             filas.append(fila)
-        res = pd.DataFrame(filas).sort_values("dias") if filas else pd.DataFrame()
-        if len(res):
-            st.dataframe(res, hide_index=True, width="stretch",
-                column_order=["ticker", "venc", "precio", "vol", "TIR", "TNA", "TEM", "MD", "dias",
-                              "margen", "TAMAR_prom", "pct_conoc", "VT_hoy", "VPV"],
-                column_config={
-                    "ticker": st.column_config.TextColumn("Especie"),
-                    "venc": st.column_config.DateColumn("Vto", format="DD/MM/YYYY"),
-                    "precio": st.column_config.NumberColumn("Precio", format="%.2f"),
-                    "vol": st.column_config.NumberColumn("Vol", format="%d"),
-                    "TIR": st.column_config.NumberColumn("TIR", format="percent"),
-                    "TNA": st.column_config.NumberColumn("TNA", format="percent"),
-                    "TEM": st.column_config.NumberColumn("TEM", format="percent"),
-                    "MD": st.column_config.NumberColumn("MD", format="%.2f"),
-                    "dias": st.column_config.NumberColumn("Días", format="%d"),
-                    "margen": st.column_config.NumberColumn("Margen", format="percent"),
-                    "TAMAR_prom": st.column_config.NumberColumn("TAMAR prom", format="percent"),
-                    "pct_conoc": st.column_config.ProgressColumn("% conocido", format="%.0f%%", min_value=0.0, max_value=1.0),
-                    "VT_hoy": st.column_config.NumberColumn("VT hoy", format="%.2f"),
-                    "VPV": st.column_config.NumberColumn("VPV", format="%.2f")})
-        st.caption("VPV = 100·(1+TAMAR_TEM)^(días 30/360 / 30) · TAMAR_TEM = ((1+(TAMAR+margen)/(365/32))^(365/32))^(1/12)−1. "
-                   "TAMAR = promedio simple en [emisión−10háb, vto−10háb]; parte futura a la TAMAR proyectada. "
-                   "Validá «VT hoy» contra el VT que ves en Docta para confirmar la emisión; la TIR usa el VPV contra el precio.")
+        res = pd.DataFrame(filas).sort_values("dias")
+        st.dataframe(res, hide_index=True, width="stretch",
+            column_order=["ticker", "venc", "precio", "vol", "TIR", "TNA", "TEM", "MD", "dias",
+                          "margen", "TAMAR_prom", "pct_conoc", "VT_hoy", "VPV"],
+            column_config={
+                "ticker": st.column_config.TextColumn("Especie"),
+                "venc": st.column_config.DateColumn("Vto", format="DD/MM/YYYY"),
+                "precio": st.column_config.NumberColumn("Precio", format="%.2f"),
+                "vol": st.column_config.NumberColumn("Vol", format="%d"),
+                "TIR": st.column_config.NumberColumn("TIR", format="percent"),
+                "TNA": st.column_config.NumberColumn("TNA", format="percent"),
+                "TEM": st.column_config.NumberColumn("TEM", format="percent"),
+                "MD": st.column_config.NumberColumn("MD", format="%.2f"),
+                "dias": st.column_config.NumberColumn("Días", format="%d"),
+                "margen": st.column_config.NumberColumn("Margen", format="percent"),
+                "TAMAR_prom": st.column_config.NumberColumn("TAMAR prom", format="percent"),
+                "pct_conoc": st.column_config.ProgressColumn("% conocido", format="%.0f%%", min_value=0.0, max_value=1.0),
+                "VT_hoy": st.column_config.NumberColumn("VT hoy", format="%.2f"),
+                "VPV": st.column_config.NumberColumn("VPV", format="%.2f")})
 
-with st.expander("📐 Cómo se calcula cada métrica"):
-    st.markdown(r"""
-**Liquidación y plazo.** La fecha de operación es el último día hábil ≤ hoy; la liquidación es **T+1 hábil** (o CI). `n` = días corridos entre liquidación y vencimiento. Los días hábiles saltean fines de semana y feriados.
-
----
-**Tasa fija (LECAP/BONCAP) · base 365.** Se trabaja sobre el **VPV** (pago final cada 100 VN). Con `r = VPV / Precio`:
-""")
-    st.latex(r"\text{TNA} = (r-1)\cdot\frac{365}{n} \qquad \text{TIR (TEA)} = r^{\,365/n}-1 \qquad \text{TEM} = (1+\text{TIR})^{1/12}-1")
-    st.latex(r"\text{Paridad} = \frac{\text{Precio}}{\text{VPV}} \qquad \text{MD (años)} = \frac{n/365}{1+\text{TIR}}")
-    st.markdown(r"""
----
-**CER (BONCER/LECER) · TIR real.** El cupón cero y los con cupón se valúan en **unidades CER-base** (se cancela el CER futuro desconocido).
-
-- **CER de referencia** con rezago de 10 días hábiles: `CER_ref(fecha)` = valor del índice CER del día hábil 10 hábiles antes.
-- **Coeficiente**: `coef = CER_ref(liquidación) / CER_emisión`  ·  **Valor técnico**: `VT = 100 · coef`.
-- **TIR real**: se descuentan los flujos nominales (amortización + cupones) y se iguala al precio deflactado por CER:
-""")
-    st.latex(r"\frac{\text{Precio}}{coef} = \sum_i \frac{CF_i}{(1+\text{TIR})^{\,t_i}}, \quad t_i=\frac{\text{días}_i}{365}")
-    st.latex(r"\text{(cupón cero)}\;\; \text{TIR}=\left(\tfrac{VT}{\text{Precio}}\right)^{365/n}-1 \qquad \text{TNA real}=12\big[(1+\text{TIR})^{1/12}-1\big]")
-    st.markdown(r"""
-La MD es la duration de Macaulay (con esos flujos y la TIR real) dividida por `(1+TIR)`.
-
----
-**Inflación breakeven (Fisher).** Iguala el retorno nominal de la fija con el nominal-equivalente del CER:
-""")
-    st.latex(r"\pi^{*} = \frac{1+\text{TIR}_{\text{fija}}}{1+\text{TIR}_{\text{real CER}}}-1")
-    st.markdown(r"""
-Si esperás inflación **mayor** que `π*`, conviene el CER; si **menor**, la tasa fija. La curva de breakeven interpola la TIR fija al plazo de cada CER.
-
----
-**Caro / barato (curva).** Se ajusta una regresión logarítmica `TIR = a + b·ln(MD)` por clase; la distancia a la curva es `bps = (TIR − ajuste)·10000`. **Barato** = rinde más que la curva (bps > 0); **caro** = rinde menos.
-
----
-**Calculadora inversa.** Despeja el precio dada una TIR objetivo: para fija `Precio = VPV/(1+TIR)^(n/365)`; para CER, `Precio = coef · Σ CF_i/(1+TIR)^(t_i)`.
-""")
+st.divider()
+st.caption("⚠️ Esta herramienta es solo a modo educativo y de visualización. Los cálculos son estimaciones "
+           "y pueden contener errores o supuestos que no reflejen la realidad del mercado. No constituye "
+           "recomendación de inversión ni asesoramiento financiero. Verificá siempre con tu fuente oficial "
+           "antes de operar.")
 
 st.caption(f"Fuentes: BCRA CER · rendimientos.co · ArgentinaDatos · data912 ({n_uni} instrumentos).")
